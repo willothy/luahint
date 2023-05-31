@@ -73,7 +73,7 @@ impl Scope {
 
     #[allow(unused)]
     pub fn get_var_id(&self, name: &str) -> Option<VarId> {
-        self.var_names.get(name).map(|id| *id)
+        self.var_names.get(name).copied()
     }
 
     #[allow(unused)]
@@ -128,9 +128,7 @@ impl ScopeManager {
 
     #[allow(unused)]
     pub fn name_current_scope(&mut self, name: impl Into<String>) {
-        self.get_current_scope_mut().map(|s| {
-            s.name = Some(name.into());
-        });
+        if let Some(s) = self.get_current_scope_mut() { s.name = Some(name.into()); }
     }
 
     pub fn get_value(&self, scope: ScopeId, value: ValueId) -> Option<&Value> {

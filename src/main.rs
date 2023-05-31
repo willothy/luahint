@@ -10,7 +10,7 @@ mod visitor;
 async fn main() -> Result<()> {
     let (stdin, stdout) = (tokio::io::stdin(), tokio::io::stdout());
 
-    let (service, socket) = LspService::new(|client| Backend::new(client));
+    let (service, socket) = LspService::new(Backend::new);
     Server::new(stdin, stdout, socket).serve(service).await;
     Ok(())
 }

@@ -150,7 +150,7 @@ impl Visitor for ScopeManager {
             _ => return,
         };
 
-        node.suffixes().into_iter().next().map(|s| match s {
+        node.suffixes().next().map(|s| match s {
             Suffix::Call(Call::AnonymousCall(FunctionArgs::Parentheses { arguments, .. })) => {
                 arguments
                     .iter()
@@ -162,7 +162,7 @@ impl Visitor for ScopeManager {
                                 line: pos.line() as u32,
                                 character: pos.character() as u32,
                             },
-                            label: InlayHintLabel::String(name.clone()),
+                            label: InlayHintLabel::String(name),
                             kind: Some(InlayHintKind::PARAMETER),
                             text_edits: None,
                             tooltip: None,
