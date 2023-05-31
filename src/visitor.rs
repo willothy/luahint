@@ -1,11 +1,158 @@
 use full_moon::ast::{
-    Call, Expression, FunctionArgs, FunctionCall, FunctionDeclaration, Suffix, Value,
+    Call, Expression, FunctionArgs, FunctionCall, FunctionDeclaration, Suffix, TableConstructor,
+    Value,
 };
 use full_moon::node::Node;
 use full_moon::visitors::Visitor;
 use tower_lsp::lsp_types::*;
 
 use crate::scope::{ScopeManager, Var};
+
+impl ScopeManager {
+    pub fn extract_params(
+        &self,
+        expr: &Expression,
+    ) -> Option<Vec<(String, full_moon::tokenizer::Position)>> {
+        match expr {
+            Expression::Value { value } => match value.as_ref() {
+                Value::Function((_, f)) => Some(
+                    f.parameters()
+                        .iter()
+                        .map(|p| {
+                            (
+                                p.to_string().trim().to_string(),
+                                p.start_position().unwrap_or_default(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                Value::ParenthesesExpression(expr) => self.extract_params(expr),
+                Value::Var(var) => match var {
+                    // full_moon::ast::Var::Expression(e) => ,
+                    full_moon::ast::Var::Name(t) => {
+                        let name = t.to_string().trim().to_string();
+                        self.find_var(&name).and_then(|var| match var {
+                            Var::Local(val_id) => self
+                                .get_current_scope()?
+                                .value_arena
+                                .get(val_id)
+                                .and_then(|val| match val {
+                                    Value::Function((_, f)) => Some(
+                                        f.parameters()
+                                            .iter()
+                                            .map(|p| {
+                                                (
+                                                    p.to_string().trim().to_string(),
+                                                    p.start_position().unwrap_or_default(),
+                                                )
+                                            })
+                                            .collect::<Vec<_>>(),
+                                    ),
+                                    _ => None,
+                                }),
+                            Var::Reference(scope_id, var_id) => {
+                                let (scope, val) = self.resolve_reference(scope_id, var_id)?;
+                                self.get_scope(scope)?.value_arena.get(val).and_then(
+                                    |val| match val {
+                                        Value::Function((_, f)) => Some(
+                                            f.parameters()
+                                                .iter()
+                                                .map(|p| {
+                                                    (
+                                                        p.to_string().trim().to_string(),
+                                                        p.start_position().unwrap_or_default(),
+                                                    )
+                                                })
+                                                .collect::<Vec<_>>(),
+                                        ),
+                                        _ => None,
+                                    },
+                                )
+                            }
+                        })
+                    }
+                    _ => return None,
+                },
+                _ => return None,
+            },
+            Expression::Parentheses { expression, .. } => self.extract_params(expression),
+            // Expression::BinaryOperator { lhs, binop, rhs } => {}
+            // Expression::UnaryOperator { unop, expression } => {}
+            _ => None,
+        }
+    }
+}
+
+pub trait Fields {
+    fn named_fields(&self) -> Vec<(String, &Expression)>;
+    fn named_field(&self, name: String) -> Option<&Expression>;
+
+    fn indexed_fields(&self) -> Vec<&Expression>;
+    fn indexed_field(&self, index: usize) -> Option<&Expression>;
+
+    fn expr_fields(&self) -> Vec<(&Expression, &Expression)>;
+    fn expr_field(&self, index: &Expression) -> Option<&Expression>;
+}
+
+impl Fields for TableConstructor {
+    fn named_field(&self, name: String) -> Option<&Expression> {
+        self.fields().into_iter().find_map(|field| match field {
+            full_moon::ast::Field::NameKey { key, value, .. } => {
+                (key.to_string() == name).then(|| value)
+            }
+            _ => None,
+        })
+    }
+
+    fn named_fields(&self) -> Vec<(String, &Expression)> {
+        self.fields()
+            .into_iter()
+            .filter_map(|field| match field {
+                full_moon::ast::Field::NameKey { key, value, .. } => Some((key.to_string(), value)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn indexed_fields(&self) -> Vec<&Expression> {
+        self.fields()
+            .into_iter()
+            .filter_map(|field| match field {
+                full_moon::ast::Field::NoKey(value) => Some(value),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn indexed_field(&self, index: usize) -> Option<&Expression> {
+        self.fields()
+            .into_iter()
+            .filter_map(|field| match field {
+                full_moon::ast::Field::NoKey(val) => Some(val),
+                _ => None,
+            })
+            .nth(index)
+    }
+
+    fn expr_fields(&self) -> Vec<(&Expression, &Expression)> {
+        self.fields()
+            .into_iter()
+            .filter_map(|field| match field {
+                full_moon::ast::Field::ExpressionKey { key, value, .. } => Some((key, value)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn expr_field(&self, index: &Expression) -> Option<&Expression> {
+        self.fields().into_iter().find_map(|field| match field {
+            full_moon::ast::Field::ExpressionKey { key, value, .. } => {
+                (key == index).then(|| value)
+            }
+            _ => None,
+        })
+    }
+}
 
 impl Visitor for ScopeManager {
     fn visit_block(&mut self, block: &full_moon::ast::Block) {
@@ -64,20 +211,14 @@ impl Visitor for ScopeManager {
             .zip(node.expressions().into_iter())
             .for_each(|(v, e)| match v {
                 full_moon::ast::Var::Name(name) => match e {
-                    Expression::Value { value } => match value.as_ref() {
-                        Value::Function((_, f)) => {
-                            let Some(scope) = self.scopes.get_mut(global_id) else {
-								return
-							};
-                            let name = name.to_string().trim().to_string();
-                            scope.alloc_local(
-                                name.clone(),
-                                Value::Function((f.end_token().clone(), f.clone())),
-                            );
-                            self.name_next_scope(name);
-                        }
-                        _ => {}
-                    },
+                    Expression::Value { value } => {
+                        let Some(scope) = self.scopes.get_mut(global_id) else {
+                			return
+                		};
+                        let name = name.to_string().trim().to_string();
+                        scope.alloc_local(name.clone(), *value.clone());
+                        self.name_next_scope(name);
+                    }
                     _ => {}
                 },
                 _ => {}
@@ -93,20 +234,14 @@ impl Visitor for ScopeManager {
             .into_iter()
             .zip(node.expressions().into_iter())
             .for_each(|(name, e)| match e {
-                Expression::Value { value } => match value.as_ref() {
-                    Value::Function((_, f)) => {
-                        let Some(scope) = self.get_current_scope_mut() else {
-							return
-						};
-                        let name = name.to_string().trim().to_string();
-                        scope.alloc_local(
-                            name.clone(),
-                            Value::Function((f.end_token().clone(), f.clone())),
-                        );
-                        self.name_next_scope(name);
-                    }
-                    _ => {}
-                },
+                Expression::Value { value } => {
+                    let Some(scope) = self.get_current_scope_mut() else {
+                			return
+                		};
+                    let name = name.to_string().trim().to_string();
+                    scope.alloc_local(name.clone(), *value.clone());
+                    self.name_next_scope(name);
+                }
                 _ => {}
             });
     }
@@ -146,6 +281,12 @@ impl Visitor for ScopeManager {
                 } else {
                     return;
                 }
+            }
+            full_moon::ast::Prefix::Expression(expr) => {
+                let Some(params) = self.extract_params(expr) else {
+					return;
+				};
+                params
             }
             _ => return,
         };
