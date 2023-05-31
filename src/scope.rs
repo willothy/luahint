@@ -1,12 +1,31 @@
 use std::collections::HashMap;
 
-use full_moon::{ast::Ast, node::Node, visitors::Visitor};
+use full_moon::{
+    ast::{Ast, Value},
+    node::Node,
+    visitors::Visitor,
+};
+use linked_hash_map::LinkedHashMap;
 use lsp_types::InlayHint;
 use slotmap::{new_key_type, SlotMap};
 
+new_key_type! {
+    pub struct ScopeId;
+    pub struct VarId;
+    pub struct ValueId;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Var {
+    Local(ValueId),
+    Reference(ScopeId, VarId),
+}
+
 #[derive(Debug)]
 pub struct Scope {
-    pub functions: HashMap<String, Vec<(String, full_moon::tokenizer::Position)>>,
+    pub value_arena: SlotMap<ValueId, Value>,
+    pub var_arena: SlotMap<VarId, Var>,
+    pub var_names: LinkedHashMap<String, VarId>,
     pub parent: Option<ScopeId>,
     pub name: Option<String>,
 }
@@ -14,7 +33,9 @@ pub struct Scope {
 impl Scope {
     pub fn new(parent: Option<ScopeId>) -> Self {
         Self {
-            functions: HashMap::new(),
+            value_arena: SlotMap::with_key(),
+            var_arena: SlotMap::with_key(),
+            var_names: LinkedHashMap::new(),
             parent,
             name: None,
         }
@@ -22,10 +43,48 @@ impl Scope {
 
     pub fn new_named(parent: Option<ScopeId>, name: String) -> Self {
         Self {
-            functions: HashMap::new(),
+            value_arena: SlotMap::with_key(),
+            var_arena: SlotMap::with_key(),
+            var_names: LinkedHashMap::new(),
             parent,
             name: Some(name),
         }
+    }
+
+    pub fn alloc_value(&mut self, value: Value) -> ValueId {
+        self.value_arena.insert(value)
+    }
+
+    pub fn alloc_var(&mut self, name: String, var: Var) -> VarId {
+        let id = self.var_arena.insert(var);
+        self.var_names.insert(name, id);
+        id
+    }
+
+    pub fn alloc_local(&mut self, name: String, value: Value) -> VarId {
+        let id = self.alloc_value(value);
+        self.alloc_var(name, Var::Local(id))
+    }
+
+    #[allow(unused)]
+    pub fn alloc_reference(&mut self, name: String, scope: ScopeId, var: VarId) -> VarId {
+        self.alloc_var(name, Var::Reference(scope, var))
+    }
+
+    #[allow(unused)]
+    pub fn get_var_id(&self, name: &str) -> Option<VarId> {
+        self.var_names.get(name).map(|id| *id)
+    }
+
+    #[allow(unused)]
+    pub fn get_var(&self, name: &str) -> Option<&Var> {
+        self.get_var_id(name).and_then(|id| self.var_arena.get(id))
+    }
+
+    #[allow(unused)]
+    pub fn get_var_mut(&mut self, name: &str) -> Option<&mut Var> {
+        self.get_var_id(name)
+            .and_then(move |id| self.var_arena.get_mut(id))
     }
 
     #[allow(unused)]
@@ -38,10 +97,6 @@ impl Scope {
         self.name = Some(name.into());
         self
     }
-}
-
-new_key_type! {
-    pub struct ScopeId;
 }
 
 pub struct ScopeManager {
@@ -78,21 +133,37 @@ impl ScopeManager {
         });
     }
 
-    pub fn find_function(
-        &self,
-        name: &str,
-    ) -> Option<(ScopeId, &[(String, full_moon::tokenizer::Position)])> {
+    pub fn get_value(&self, scope: ScopeId, value: ValueId) -> Option<&Value> {
+        self.scopes.get(scope)?.value_arena.get(value)
+    }
+
+    pub fn resolve_reference(&self, scope: ScopeId, var: VarId) -> Option<(ScopeId, ValueId)> {
+        let v = self.scopes.get(scope)?.var_arena.get(var)?;
+        match v {
+            Var::Reference(scope, var) => self.resolve_reference(*scope, *var),
+            Var::Local(value) => Some((scope, *value)),
+        }
+    }
+
+    pub fn find_var(&self, name: &str) -> Option<Var> {
         let Some(mut id) = self.stack.last().copied() else {
         	return None;
         };
+        let mut original = true;
         loop {
             let Some(scope) = self.scopes.get(id) else {
 				return None;
 			};
-            if let Some(params) = scope.functions.get(name) {
-                return Some((id, params.as_slice()));
+            if let Some(var) = scope.var_names.get(name) {
+                if original {
+                    let var = scope.var_arena.get(*var)?;
+                    return Some(*var);
+                } else {
+                    return Some(Var::Reference(id, *var));
+                }
             }
             if let Some(parent) = scope.parent {
+                original = false;
                 id = parent;
             } else {
                 break;

@@ -5,7 +5,7 @@ use full_moon::node::Node;
 use full_moon::visitors::Visitor;
 use tower_lsp::lsp_types::*;
 
-use crate::scope::ScopeManager;
+use crate::scope::{ScopeManager, Var};
 
 impl Visitor for ScopeManager {
     fn visit_block(&mut self, block: &full_moon::ast::Block) {
@@ -22,17 +22,10 @@ impl Visitor for ScopeManager {
 		};
         let name = func.name().to_string();
         let body = func.body();
-        let params = body
-            .parameters()
-            .iter()
-            .map(|param| {
-                (
-                    param.to_string(),
-                    param.start_position().unwrap_or_default(),
-                )
-            })
-            .collect();
-        scope.functions.insert(name.clone(), params);
+        scope.alloc_local(
+            name.clone(),
+            Value::Function((body.end_token().clone(), body.clone())),
+        );
         self.name_next_scope(name);
     }
 
@@ -45,17 +38,10 @@ impl Visitor for ScopeManager {
 		};
         let name = node.name().to_string().trim().to_string();
         let body = node.body();
-        let params = body
-            .parameters()
-            .iter()
-            .map(|param| {
-                (
-                    param.to_string(),
-                    param.start_position().unwrap_or_default(),
-                )
-            })
-            .collect();
-        scope.functions.insert(name.clone(), params);
+        scope.alloc_local(
+            name.clone(),
+            Value::Function((body.end_token().clone(), body.clone())),
+        );
         self.stack.push(*global_id);
         self.name_next_scope(name);
     }
@@ -84,18 +70,10 @@ impl Visitor for ScopeManager {
 								return
 							};
                             let name = name.to_string().trim().to_string();
-                            let params = f
-                                .parameters()
-                                .iter()
-                                .map(|param| {
-                                    (
-                                        param.to_string(),
-                                        param.start_position().unwrap_or_default(),
-                                    )
-                                })
-                                .collect();
-
-                            scope.functions.insert(name.clone(), params);
+                            scope.alloc_local(
+                                name.clone(),
+                                Value::Function((f.end_token().clone(), f.clone())),
+                            );
                             self.name_next_scope(name);
                         }
                         _ => {}
@@ -121,18 +99,10 @@ impl Visitor for ScopeManager {
 							return
 						};
                         let name = name.to_string().trim().to_string();
-                        let params = f
-                            .parameters()
-                            .iter()
-                            .map(|param| {
-                                (
-                                    param.to_string(),
-                                    param.start_position().unwrap_or_default(),
-                                )
-                            })
-                            .collect();
-
-                        scope.functions.insert(name.clone(), params);
+                        scope.alloc_local(
+                            name.clone(),
+                            Value::Function((f.end_token().clone(), f.clone())),
+                        );
                         self.name_next_scope(name);
                     }
                     _ => {}
@@ -144,11 +114,35 @@ impl Visitor for ScopeManager {
     fn visit_local_assignment_end(&mut self, _node: &full_moon::ast::LocalAssignment) {}
 
     fn visit_function_call(&mut self, node: &FunctionCall) {
-        let (_, params) = match node.prefix() {
+        let params = match node.prefix() {
             full_moon::ast::Prefix::Name(n) => {
                 let name = n.to_string().trim().to_string();
-                if let Some((_, params)) = self.find_function(&name) {
-                    (name, params.to_vec())
+                let curr_scope = self.get_current_scope_id().unwrap();
+
+                let var = self
+                    .find_var(&name)
+                    .and_then(|var| match var {
+                        Var::Local(val) => Some((curr_scope, val)),
+                        Var::Reference(scope, var) => self.resolve_reference(scope, var),
+                    })
+                    .and_then(|(scope, val)| {
+                        let val = self.get_value(scope, val)?;
+                        match val {
+                            Value::Function((_, f)) => Some(f),
+                            _ => None,
+                        }
+                    });
+
+                if let Some(var) = var {
+                    var.parameters()
+                        .iter()
+                        .map(|p| {
+                            (
+                                p.to_string().trim().to_string(),
+                                p.start_position().unwrap_or_default(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
                 } else {
                     return;
                 }
